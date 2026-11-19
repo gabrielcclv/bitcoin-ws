@@ -1,0 +1,130 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #0e0c0a;
+  color: #f4efe6;
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+.btc-chart-page {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.btc-chart-card {
+  width: min(100%, 880px);
+  background: #161411;
+  border: 1px solid rgb(244 239 230 / 0.14);
+  border-radius: 14px;
+  padding: 24px 28px;
+  box-shadow: 0 20px 50px rgb(0 0 0 / 0.45);
+}
+
+.btc-chart-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+
+.btc-label {
+  display: block;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #f7931a;
+  margin-bottom: 4px;
+}
+
+.btc-current-price {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: clamp(1.8rem, 4vw, 2.5rem);
+  font-weight: 700;
+  color: #f4efe6;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  border: 1px solid rgb(244 239 230 / 0.2);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.status-badge.is-live {
+  border-color: rgb(62 207 191 / 0.45);
+  color: #3ecfbf;
+  background: rgb(62 207 191 / 0.08);
+}
+
+.status-badge.is-live .status-dot {
+  background: #3ecfbf;
+  box-shadow: 0 0 8px #3ecfbf;
+}
+
+.status-badge.is-reconnecting {
+  border-color: rgb(247 147 26 / 0.45);
+  color: #f7931a;
+  background: rgb(247 147 26 / 0.08);
+}
+
+.status-badge.is-reconnecting .status-dot {
+  background: #f7931a;
+}
+
+.btc-svg-wrapper {
+  width: 100%;
+  background: #0e0c0a;
+  border: 1px solid rgb(244 239 230 / 0.1);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.btc-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.btc-chart-footer {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 14px;
+  font-family: ui-monospace, monospace;
+  font-size: 12.5px;
+  color: rgb(244 239 230 / 0.65);
+}
+
+.btc-chart-footer strong {
+  color: #f4efe6;
+}
