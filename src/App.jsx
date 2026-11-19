@@ -1,256 +1,289 @@
-import { useEffect, useState } from 'react';
-import { catmullRomPath, closedRibbon } from './streamfield/path.js';
+import { useState } from 'react';
+import AnalyticsAndPositionBar from './components/AnalyticsAndPositionBar.jsx';
+import OrderBookAndTape from './components/OrderBookAndTape.jsx';
+import ProChart from './components/ProChart.jsx';
+import useCryptoTerminalStream, { PAIR_DEFAULTS } from './hooks/useCryptoTerminalStream.js';
 
-const BINANCE_WS_URL = 'wss://stream.binance.com:9443/ws/btcusdt@trade';
-const BINANCE_REST_URL = 'https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1s&limit=48';
-const HISTORY_LIMIT = 48;
+const SYMBOLS = Object.keys(PAIR_DEFAULTS);
+const INTERVALS = [
+  { id: '1s', label: '1s (Live Tick)' },
+  { id: '1m', label: '1m' },
+  { id: '5m', label: '5m' },
+  { id: '15m', label: '15m' },
+  { id: '1h', label: '1h' },
+];
 
-/**
- * Custom hook following Unit 10's full WebSocket lifecycle:
- * - Initial seed from REST API
- * - Connect (`onopen`), receive frames (`onmessage`), auto-reconnect (`onclose`),
- *   and clean `socket.close()` on unmount.
- */
-function useBitcoinStream() {
-  const [price, setPrice] = useState(null);
-  const [history, setHistory] = useState([]);
-  const [connected, setConnected] = useState(false);
-
-  useEffect(() => {
-    let socket;
-    let reconnectTimer;
-    let cancelled = false;
-
-    // Cargar las últimas 48 lecturas iniciales desde la API REST de Binance para pintar la gráfica al instante
-    fetch(BINANCE_REST_URL)
-      .then((res) => res.json())
-      .then((klines) => {
-        if (cancelled || !Array.isArray(klines)) return;
-        const points = klines.map((k) => ({
-          price: parseFloat(k[4]),
-          timestamp: k[0],
-        }));
-        if (points.length > 0) {
-          setHistory(points);
-          setPrice(points[points.length - 1].price);
-        }
-      })
-      .catch(() => {
-        // Si falla el seed inicial por red, el WebSocket irá llenando la gráfica igualmente
-      });
-
-    function connect() {
-      if (cancelled) return;
-      socket = new WebSocket(BINANCE_WS_URL);
-
-      socket.onopen = () => {
-        if (cancelled) return;
-        setConnected(true);
-      };
-
-      socket.onmessage = (event) => {
-        if (cancelled) return;
-        try {
-          const msg = JSON.parse(event.data);
-          const nextPrice = parseFloat(msg.p ?? msg.c);
-          if (!Number.isFinite(nextPrice)) return;
-
-          const now = msg.T ?? Date.now();
-          setPrice(nextPrice);
-          setHistory((prev) => {
-            // Muestreamos como máximo ~1 punto cada 500ms para que la gráfica avance fluida
-            if (prev.length > 0 && now - prev[prev.length - 1].timestamp < 500) {
-              const updated = [...prev];
-              updated[updated.length - 1] = { price: nextPrice, timestamp: prev[prev.length - 1].timestamp };
-              return updated;
-            }
-            const next = [...prev, { price: nextPrice, timestamp: now }];
-            return next.length > HISTORY_LIMIT ? next.slice(-HISTORY_LIMIT) : next;
-          });
-        } catch {
-          // Ignorar tramas malformadas
-        }
-      };
-
-      socket.onclose = () => {
-        if (cancelled) return;
-        setConnected(false);
-        // Reconexión automática tras 2 segundos (Unit 10 lifecycle)
-        reconnectTimer = setTimeout(connect, 2000);
-      };
-    }
-
-    connect();
-
-    // Cleanup al desmontar: limpia el timer y cierra el WebSocket
-    return () => {
-      cancelled = true;
-      clearTimeout(reconnectTimer);
-      if (socket) {
-        socket.onopen = null;
-        socket.onmessage = null;
-        socket.onclose = null;
-        socket.close();
-      }
-    };
-  }, []);
-
-  return { price, history, connected };
+function formatPrice(val) {
+  if (val == null || !Number.isFinite(val)) return '—';
+  const digits = val >= 1000 ? 2 : val >= 10 ? 2 : 4;
+  return val.toLocaleString('en-US', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
 }
 
 export default function App() {
-  const { price, history, connected } = useBitcoinStream();
+  const [symbol, setSymbol] = useState('BTCUSDT');
+  const [interval, setIntervalState] = useState('1s');
+  const [mode, setMode] = useState('live'); // 'live' (Binance WS) | 'simulated' (HF Engine)
+  const [streamEnabled, setStreamEnabled] = useState(true);
 
-  const W = 800;
-  const H = 360;
-  const PAD_X = 28;
-  const PAD_Y = 36;
-  const BASE_Y = H - PAD_Y;
+  // Chart display controls
+  const [chartType, setChartType] = useState('area'); // 'area' | 'candles' | 'baseline'
+  const [showEMA, setShowEMA] = useState(true);
+  const [showBollinger, setShowBollinger] = useState(true);
+  const [showVolume, setShowVolume] = useState(true);
 
-  const prices = history.map((d) => d.price);
-  const minPrice = prices.length ? Math.min(...prices) : 0;
-  const maxPrice = prices.length ? Math.max(...prices) : 0;
-  const padRange = Math.max((maxPrice - minPrice) * 0.15, 5);
-  const low = minPrice - padRange;
-  const high = maxPrice + padRange;
-  const range = Math.max(high - low, 1);
+  // Alerts & Paper Trading state
+  const [alertPrice, setAlertPrice] = useState(null);
+  const [activePosition, setActivePosition] = useState(null);
+  const [realizedPnl, setRealizedPnl] = useState(0);
 
-  const points =
-    history.length >= 2
-      ? history.map((item, i) => {
-          const t = (item.price - low) / range;
-          return {
-            x: PAD_X + (i / (history.length - 1)) * (W - PAD_X * 2),
-            y: BASE_Y - Math.max(0, Math.min(1, t)) * (H - PAD_Y * 2),
-          };
-        })
-      : [];
+  const {
+    pairMeta,
+    candles,
+    ticker,
+    priceDirection,
+    orderBook,
+    trades,
+    status,
+    lastMessageAt,
+    latencyMs,
+    ticksPerSec,
+    sequence,
+    latestFrame,
+  } = useCryptoTerminalStream({
+    symbol,
+    interval,
+    mode,
+    enabled: streamEnabled,
+  });
 
-  const strokePath = catmullRomPath(points);
-  const fillPath = closedRibbon(points, BASE_Y);
-  const head = points[points.length - 1];
+  const currentPrice = ticker.price;
+  const isPositive24h = (ticker.change24hPct ?? 0) >= 0;
+
+  function handleSymbolChange(nextSym) {
+    setSymbol(nextSym);
+    setAlertPrice(null);
+    setActivePosition(null);
+  }
+
+  function handleClosePosition(pnlUsd) {
+    setRealizedPnl((prev) => Number((prev + pnlUsd).toFixed(2)));
+    setActivePosition(null);
+  }
 
   return (
-    <main className="btc-chart-page">
-      <div className="btc-chart-card">
-        <header className="btc-chart-header">
-          <div>
-            <span className="btc-label">BTC / USDT · Live API</span>
-            <h1 className="btc-current-price">
-              {price != null
-                ? `$${price.toLocaleString('en-US', {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })}`
-                : 'Cargando…'}
-            </h1>
+    <div className="nexus-terminal">
+      {/* TOP INSTITUTIONAL BAR */}
+      <header className="nexus-topbar">
+        <div className="topbar-left">
+          <div className="brand-mark">
+            <span className="brand-icon">₿</span>
+            <div>
+              <span className="brand-name">NEXUS</span>
+              <span className="brand-tag">PRO WS</span>
+            </div>
           </div>
-          <span className={`status-badge ${connected ? 'is-live' : 'is-reconnecting'}`}>
-            <span className="status-dot" />
-            {connected ? 'Connected (WebSocket)' : 'Reconnecting…'}
-          </span>
-        </header>
 
-        <div className="btc-svg-wrapper">
-          <svg
-            className="btc-svg"
-            viewBox={`0 0 ${W} ${H}`}
-            role="img"
-            aria-label={
-              price != null
-                ? `Gráfica del precio de Bitcoin en tiempo real: $${price} USD`
-                : 'Esperando datos de Bitcoin'
-            }
-          >
-            <defs>
-              <linearGradient id="btc-stroke" x1="0" y1="0" x2="1" y2="0">
-                <stop offset="0%" stopColor="#3ecfbf" />
-                <stop offset="100%" stopColor="#f7931a" />
-              </linearGradient>
-              <linearGradient id="btc-fill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#f7931a" stopOpacity="0.28" />
-                <stop offset="100%" stopColor="#f7931a" stopOpacity="0.0" />
-              </linearGradient>
-            </defs>
-
-            {/* Líneas de guía horizontal */}
-            {[0.2, 0.5, 0.8].map((ratio) => {
-              const y = PAD_Y + ratio * (H - PAD_Y * 2);
-              const val = high - ratio * range;
-              return (
-                <g key={ratio}>
-                  <line
-                    x1={PAD_X}
-                    y1={y}
-                    x2={W - PAD_X}
-                    y2={y}
-                    stroke="#f4efe6"
-                    strokeOpacity="0.08"
-                    strokeDasharray="4 4"
-                  />
-                  {prices.length > 0 && (
-                    <text
-                      x={W - PAD_X}
-                      y={y - 6}
-                      textAnchor="end"
-                      fill="#f4efe6"
-                      fillOpacity="0.4"
-                      fontFamily="ui-monospace, monospace"
-                      fontSize="11"
-                    >
-                      ${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </text>
-                  )}
-                </g>
-              );
-            })}
-
-            {fillPath && <path d={fillPath} fill="url(#btc-fill)" />}
-
-            {strokePath ? (
-              <path
-                d={strokePath}
-                fill="none"
-                stroke="url(#btc-stroke)"
-                strokeWidth="3"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            ) : (
-              <text
-                x={W / 2}
-                y={H / 2}
-                textAnchor="middle"
-                fill="#f4efe6"
-                fillOpacity="0.5"
-                fontFamily="ui-monospace, monospace"
-                fontSize="14"
+          {/* Pair Switcher */}
+          <div className="pair-selector" role="tablist" aria-label="Selector de criptomoneda">
+            {SYMBOLS.map((sym) => (
+              <button
+                key={sym}
+                type="button"
+                className={`pair-pill ${symbol === sym ? 'is-active' : ''}`}
+                onClick={() => handleSymbolChange(sym)}
               >
-                Conectando con la API de Bitcoin…
-              </text>
-            )}
+                {PAIR_DEFAULTS[sym].label}
+              </button>
+            ))}
+          </div>
 
-            {head && (
-              <g>
-                <circle cx={head.x} cy={head.y} r="8" fill="#f7931a" fillOpacity="0.3" />
-                <circle cx={head.x} cy={head.y} r="4" fill="#f7931a" />
-              </g>
-            )}
-          </svg>
+          {/* Hero Live Quote */}
+          <div className={`hero-price-box dir-${priceDirection}`}>
+            <span className="hero-price-val">${formatPrice(currentPrice)}</span>
+            <span className={`hero-price-change ${isPositive24h ? 'text-bull' : 'text-bear'}`}>
+              {isPositive24h ? '▲ +' : '▼ '}
+              {ticker.change24hPct}%
+            </span>
+          </div>
         </div>
 
-        {prices.length > 0 && (
-          <footer className="btc-chart-footer">
+        {/* 24h Key Market Metrics */}
+        <div className="topbar-metrics">
+          <div className="metric-cell">
+            <span>24H MÁXIMO</span>
+            <strong>${formatPrice(ticker.high24h)}</strong>
+          </div>
+          <div className="metric-cell">
+            <span>24H MÍNIMO</span>
+            <strong>${formatPrice(ticker.low24h)}</strong>
+          </div>
+          <div className="metric-cell">
+            <span>24H VOL ({symbol.replace('USDT', '')})</span>
+            <strong>{ticker.volume24h?.toLocaleString('en-US', { maximumFractionDigits: 0 })}</strong>
+          </div>
+          <div className="metric-cell">
+            <span>THROUGHPUT</span>
+            <strong className="text-cyan">
+              {ticksPerSec} TPS · {latencyMs}ms
+            </strong>
+          </div>
+        </div>
+
+        {/* WebSocket Source & Connection Lifecycle Controls */}
+        <div className="topbar-right">
+          <div className="mode-toggle" role="group" aria-label="Fuente de datos WebSocket">
+            <button
+              type="button"
+              className={`mode-btn ${mode === 'live' ? 'is-active' : ''}`}
+              onClick={() => setMode('live')}
+              title="WebSocket real combinado de Binance (@trade + @ticker + @depth10)"
+            >
+              Binance Live API
+            </button>
+            <button
+              type="button"
+              className={`mode-btn ${mode === 'simulated' ? 'is-active' : ''}`}
+              onClick={() => setMode('simulated')}
+              title="Motor de alta frecuencia autónomo para demos sin red"
+            >
+              Turbo Sim
+            </button>
+          </div>
+
+          <button
+            type="button"
+            className={`ws-status-pill status-${status}`}
+            onClick={() => setStreamEnabled((prev) => !prev)}
+            title="Haz clic para pausar o reconectar el socket (Unit 10 lifecycle test)"
+          >
+            <span className="ws-dot" />
             <span>
-              Mín: <strong>${minPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+              {status === 'live'
+                ? 'WS LIVE'
+                : status === 'paused'
+                  ? 'PAUSED'
+                  : 'RECONNECTING…'}
             </span>
-            <span>Últimas {history.length} lecturas en vivo</span>
-            <span>
-              Máx: <strong>${maxPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
-            </span>
-          </footer>
-        )}
+          </button>
+        </div>
+      </header>
+
+      {/* MAIN WORKSPACE: CENTERPIECE CHART + RIGHT ORDERBOOK DOCK */}
+      <div className="nexus-workspace">
+        <main className="nexus-main-stage">
+          {/* CHART CONTROL TOOLBAR */}
+          <div className="chart-toolbar">
+            <div className="toolbar-group">
+              <span className="toolbar-label">INTERVALO</span>
+              {INTERVALS.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`tool-btn ${interval === item.id ? 'is-active' : ''}`}
+                  onClick={() => setIntervalState(item.id)}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="toolbar-group">
+              <span className="toolbar-label">MODO GRÁFICO</span>
+              <button
+                type="button"
+                className={`tool-btn ${chartType === 'area' ? 'is-active' : ''}`}
+                onClick={() => setChartType('area')}
+              >
+                ◢ Continuum Spline
+              </button>
+              <button
+                type="button"
+                className={`tool-btn ${chartType === 'candles' ? 'is-active' : ''}`}
+                onClick={() => setChartType('candles')}
+              >
+                ╫ Velas OHLC
+              </button>
+              <button
+                type="button"
+                className={`tool-btn ${chartType === 'baseline' ? 'is-active' : ''}`}
+                onClick={() => setChartType('baseline')}
+              >
+                ± Baseline Delta
+              </button>
+            </div>
+
+            <div className="toolbar-group">
+              <span className="toolbar-label">INDICADORES</span>
+              <button
+                type="button"
+                className={`tool-btn tool-btn--ind ${showEMA ? 'is-active' : ''}`}
+                onClick={() => setShowEMA((v) => !v)}
+              >
+                EMA 9/21
+              </button>
+              <button
+                type="button"
+                className={`tool-btn tool-btn--ind ${showBollinger ? 'is-active' : ''}`}
+                onClick={() => setShowBollinger((v) => !v)}
+              >
+                Bollinger (14,2)
+              </button>
+              <button
+                type="button"
+                className={`tool-btn tool-btn--ind ${showVolume ? 'is-active' : ''}`}
+                onClick={() => setShowVolume((v) => !v)}
+              >
+                Volumen
+              </button>
+            </div>
+          </div>
+
+          {/* CENTERPIECE HERO CHART */}
+          <ProChart
+            candles={candles}
+            currentPrice={currentPrice}
+            status={status}
+            chartType={chartType}
+            showEMA={showEMA}
+            showBollinger={showBollinger}
+            showVolume={showVolume}
+            alertPrice={alertPrice}
+            onSetAlertPrice={setAlertPrice}
+            activePosition={activePosition}
+          />
+
+          {/* BOTTOM ANALYTICS, ALERTS & PAPER TRADING DECK */}
+          <AnalyticsAndPositionBar
+            candles={candles}
+            ticker={ticker}
+            currentPrice={currentPrice}
+            symbolLabel={pairMeta.label}
+            alertPrice={alertPrice}
+            onSetAlertPrice={setAlertPrice}
+            activePosition={activePosition}
+            onOpenPosition={setActivePosition}
+            onClosePosition={handleClosePosition}
+            realizedPnl={realizedPnl}
+          />
+        </main>
+
+        {/* RIGHT SIDEBAR: ORDER BOOK L2 + LIVE TRADES TAPE + UNIT 10 TELEMETRY */}
+        <OrderBookAndTape
+          orderBook={orderBook}
+          trades={trades}
+          currentPrice={currentPrice}
+          priceDirection={priceDirection}
+          status={status}
+          lastMessageAt={lastMessageAt}
+          latencyMs={latencyMs}
+          ticksPerSec={ticksPerSec}
+          sequence={sequence}
+          latestFrame={latestFrame}
+        />
       </div>
-    </main>
+    </div>
   );
 }
