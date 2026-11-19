@@ -6,7 +6,7 @@ import useCryptoTerminalStream, { PAIR_DEFAULTS } from './hooks/useCryptoTermina
 
 const SYMBOLS = Object.keys(PAIR_DEFAULTS);
 const INTERVALS = [
-  { id: '1s', label: '1s (Live Tick)' },
+  { id: '1s', label: '1s (Tiempo Real)' },
   { id: '1m', label: '1m' },
   { id: '5m', label: '5m' },
   { id: '15m', label: '15m' },
@@ -14,7 +14,7 @@ const INTERVALS = [
 ];
 
 function formatPrice(val) {
-  if (val == null || !Number.isFinite(val)) return '—';
+  if (val == null || !Number.isFinite(val)) return 'Cargando…';
   const digits = val >= 1000 ? 2 : val >= 10 ? 2 : 4;
   return val.toLocaleString('en-US', {
     minimumFractionDigits: digits,
@@ -25,7 +25,6 @@ function formatPrice(val) {
 export default function App() {
   const [symbol, setSymbol] = useState('BTCUSDT');
   const [interval, setIntervalState] = useState('1s');
-  const [mode, setMode] = useState('live'); // 'live' (Binance WS) | 'simulated' (HF Engine)
   const [streamEnabled, setStreamEnabled] = useState(true);
 
   // Chart display controls
@@ -34,10 +33,8 @@ export default function App() {
   const [showBollinger, setShowBollinger] = useState(true);
   const [showVolume, setShowVolume] = useState(true);
 
-  // Alerts & Paper Trading state
+  // Visual reference line on chart
   const [alertPrice, setAlertPrice] = useState(null);
-  const [activePosition, setActivePosition] = useState(null);
-  const [realizedPnl, setRealizedPnl] = useState(0);
 
   const {
     pairMeta,
@@ -55,7 +52,6 @@ export default function App() {
   } = useCryptoTerminalStream({
     symbol,
     interval,
-    mode,
     enabled: streamEnabled,
   });
 
@@ -65,12 +61,6 @@ export default function App() {
   function handleSymbolChange(nextSym) {
     setSymbol(nextSym);
     setAlertPrice(null);
-    setActivePosition(null);
-  }
-
-  function handleClosePosition(pnlUsd) {
-    setRealizedPnl((prev) => Number((prev + pnlUsd).toFixed(2)));
-    setActivePosition(null);
   }
 
   return (
@@ -82,7 +72,7 @@ export default function App() {
             <span className="brand-icon">₿</span>
             <div>
               <span className="brand-name">NEXUS</span>
-              <span className="brand-tag">PRO WS</span>
+              <span className="brand-tag">LIVE MONITOR</span>
             </div>
           </div>
 
@@ -102,11 +92,15 @@ export default function App() {
 
           {/* Hero Live Quote */}
           <div className={`hero-price-box dir-${priceDirection}`}>
-            <span className="hero-price-val">${formatPrice(currentPrice)}</span>
-            <span className={`hero-price-change ${isPositive24h ? 'text-bull' : 'text-bear'}`}>
-              {isPositive24h ? '▲ +' : '▼ '}
-              {ticker.change24hPct}%
+            <span className="hero-price-val">
+              {currentPrice != null ? `$${formatPrice(currentPrice)}` : 'Conectando…'}
             </span>
+            {currentPrice != null && (
+              <span className={`hero-price-change ${isPositive24h ? 'text-bull' : 'text-bear'}`}>
+                {isPositive24h ? '▲ +' : '▼ '}
+                {ticker.change24hPct}%
+              </span>
+            )}
           </div>
         </div>
 
@@ -114,64 +108,49 @@ export default function App() {
         <div className="topbar-metrics">
           <div className="metric-cell">
             <span>24H MÁXIMO</span>
-            <strong>${formatPrice(ticker.high24h)}</strong>
+            <strong>{ticker.high24h != null ? `$${formatPrice(ticker.high24h)}` : '—'}</strong>
           </div>
           <div className="metric-cell">
             <span>24H MÍNIMO</span>
-            <strong>${formatPrice(ticker.low24h)}</strong>
+            <strong>{ticker.low24h != null ? `$${formatPrice(ticker.low24h)}` : '—'}</strong>
           </div>
           <div className="metric-cell">
-            <span>24H VOL ({symbol.replace('USDT', '')})</span>
-            <strong>{ticker.volume24h?.toLocaleString('en-US', { maximumFractionDigits: 0 })}</strong>
+            <span>24H VOL ({pairMeta.asset})</span>
+            <strong>
+              {ticker.volume24h != null
+                ? ticker.volume24h.toLocaleString('en-US', { maximumFractionDigits: 0 })
+                : '—'}
+            </strong>
           </div>
           <div className="metric-cell">
-            <span>THROUGHPUT</span>
+            <span>FLUJO WEBSOCKET</span>
             <strong className="text-cyan">
-              {ticksPerSec} TPS · {latencyMs}ms
+              {ticksPerSec} ticks/s · {latencyMs}ms
             </strong>
           </div>
         </div>
 
-        {/* WebSocket Source & Connection Lifecycle Controls */}
+        {/* WebSocket Connection Lifecycle Status */}
         <div className="topbar-right">
-          <div className="mode-toggle" role="group" aria-label="Fuente de datos WebSocket">
-            <button
-              type="button"
-              className={`mode-btn ${mode === 'live' ? 'is-active' : ''}`}
-              onClick={() => setMode('live')}
-              title="WebSocket real combinado de Binance (@trade + @ticker + @depth10)"
-            >
-              Binance Live API
-            </button>
-            <button
-              type="button"
-              className={`mode-btn ${mode === 'simulated' ? 'is-active' : ''}`}
-              onClick={() => setMode('simulated')}
-              title="Motor de alta frecuencia autónomo para demos sin red"
-            >
-              Turbo Sim
-            </button>
-          </div>
-
           <button
             type="button"
             className={`ws-status-pill status-${status}`}
             onClick={() => setStreamEnabled((prev) => !prev)}
-            title="Haz clic para pausar o reconectar el socket (Unit 10 lifecycle test)"
+            title="Haz clic para pausar o reconectar el WebSocket en vivo (Unit 10 lifecycle)"
           >
             <span className="ws-dot" />
             <span>
               {status === 'live'
-                ? 'WS LIVE'
+                ? 'BINANCE WS LIVE'
                 : status === 'paused'
-                  ? 'PAUSED'
-                  : 'RECONNECTING…'}
+                  ? 'STREAM PAUSADO'
+                  : 'CONECTANDO WS…'}
             </span>
           </button>
         </div>
       </header>
 
-      {/* MAIN WORKSPACE: CENTERPIECE CHART + RIGHT ORDERBOOK DOCK */}
+      {/* MAIN WORKSPACE: CENTERPIECE CHART + RIGHT MARKET DATA DOCK */}
       <div className="nexus-workspace">
         <main className="nexus-main-stage">
           {/* CHART CONTROL TOOLBAR */}
@@ -252,10 +231,9 @@ export default function App() {
             showVolume={showVolume}
             alertPrice={alertPrice}
             onSetAlertPrice={setAlertPrice}
-            activePosition={activePosition}
           />
 
-          {/* BOTTOM ANALYTICS, ALERTS & PAPER TRADING DECK */}
+          {/* BOTTOM INFORMATIONAL ANALYTICS & TECHNICAL INDICATORS DECK */}
           <AnalyticsAndPositionBar
             candles={candles}
             ticker={ticker}
@@ -263,10 +241,6 @@ export default function App() {
             symbolLabel={pairMeta.label}
             alertPrice={alertPrice}
             onSetAlertPrice={setAlertPrice}
-            activePosition={activePosition}
-            onOpenPosition={setActivePosition}
-            onClosePosition={handleClosePosition}
-            realizedPnl={realizedPnl}
           />
         </main>
 

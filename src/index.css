@@ -497,6 +497,20 @@ body {
   font-size: 10.5px;
 }
 
+.pro-chart-empty {
+  flex: 1;
+  min-height: 440px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--cyan);
+}
+
 .pro-chart-svg {
   display: block;
   width: 100%;

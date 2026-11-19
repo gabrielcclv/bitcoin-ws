@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { computeRSI } from '../streamfield/path.js';
+import { computeBollingerBands, computeEMA, computeRSI } from '../streamfield/path.js';
 
 function formatPrice(val) {
   if (val == null || !Number.isFinite(val)) return '—';
@@ -17,14 +17,8 @@ export default function AnalyticsAndPositionBar({
   symbolLabel,
   alertPrice,
   onSetAlertPrice,
-  activePosition,
-  onOpenPosition,
-  onClosePosition,
-  realizedPnl,
 }) {
   const [alertInput, setAlertInput] = useState('');
-  const [tradeQty, setTradeQty] = useState(1);
-  const [leverage, setLeverage] = useState(10);
 
   useEffect(() => {
     if (alertPrice != null) {
@@ -37,36 +31,50 @@ export default function AnalyticsAndPositionBar({
   const closes = candles.map((c) => c.close);
   const rsi = computeRSI(closes, 14);
   const rsiLabel =
-    rsi >= 70 ? 'SOBRECOMPRA' : rsi <= 30 ? 'SOBREVENTA' : rsi >= 55 ? 'ALCISTA' : rsi <= 45 ? 'BAJISTA' : 'NEUTRAL';
+    rsi >= 70
+      ? 'SOBRECOMPRA'
+      : rsi <= 30
+        ? 'SOBREVENTA'
+        : rsi >= 55
+          ? 'IMPULSO ALCISTA'
+          : rsi <= 45
+            ? 'IMPULSO BAJISTA'
+            : 'ZONA NEUTRAL';
   const rsiColorClass =
     rsi >= 70 ? 'text-bear' : rsi <= 30 ? 'text-bull' : rsi >= 52 ? 'text-bull' : 'text-cyan';
 
-  const high24 = ticker.high24h || currentPrice * 1.02;
-  const low24 = ticker.low24h || currentPrice * 0.98;
-  const range24Pct = Math.max(
-    0,
-    Math.min(100, Math.round(((currentPrice - low24) / Math.max(high24 - low24, 0.01)) * 100)),
-  );
+  const high24 = ticker.high24h || (currentPrice ? currentPrice * 1.01 : 0);
+  const low24 = ticker.low24h || (currentPrice ? currentPrice * 0.99 : 0);
+  const range24Pct =
+    currentPrice && high24 > low24
+      ? Math.max(0, Math.min(100, Math.round(((currentPrice - low24) / (high24 - low24)) * 100)))
+      : 50;
 
-  const vwapDiffPct = ticker.vwap
-    ? (((currentPrice - ticker.vwap) / ticker.vwap) * 100).toFixed(2)
-    : '0.00';
+  const vwapDiffPct =
+    ticker.vwap && currentPrice
+      ? (((currentPrice - ticker.vwap) / ticker.vwap) * 100).toFixed(2)
+      : '0.00';
 
-  // Calculate live Unrealized PnL if a simulated position is open
-  let unrealizedUsd = 0;
-  let unrealizedPct = 0;
-  if (activePosition && currentPrice) {
-    const dir = activePosition.side === 'LONG' ? 1 : -1;
-    const priceDiff = (currentPrice - activePosition.entryPrice) * dir;
-    unrealizedUsd = priceDiff * activePosition.qty * activePosition.leverage;
-    const margin = (activePosition.entryPrice * activePosition.qty) / 1;
-    unrealizedPct = margin > 0 ? (unrealizedUsd / margin) * 100 : 0;
-  }
+  // Calculate Session & Technical Summary for Card 3
+  const ema9Arr = computeEMA(closes, 9);
+  const ema21Arr = computeEMA(closes, 21);
+  const bb = computeBollingerBands(closes, 14, 2);
+
+  const lastEma9 = ema9Arr[ema9Arr.length - 1];
+  const lastEma21 = ema21Arr[ema21Arr.length - 1];
+  const lastBbUpper = bb.upper[bb.upper.length - 1];
+  const lastBbLower = bb.lower[bb.lower.length - 1];
+
+  const isTrendBullish = lastEma9 != null && lastEma21 != null && lastEma9 >= lastEma21;
+  const bbWidthPct =
+    lastBbUpper && lastBbLower && currentPrice
+      ? (((lastBbUpper - lastBbLower) / currentPrice) * 100).toFixed(3)
+      : '0.000';
 
   const alertTriggered =
     typeof alertPrice === 'number' &&
     typeof currentPrice === 'number' &&
-    Math.abs(currentPrice - alertPrice) / currentPrice <= 0.0006;
+    Math.abs(currentPrice - alertPrice) / currentPrice <= 0.0008;
 
   function handleApplyAlert(e) {
     e.preventDefault();
@@ -77,11 +85,14 @@ export default function AnalyticsAndPositionBar({
   }
 
   return (
-    <section className="bottom-analytics-deck" aria-label="Technical Indicators and Trading Simulator">
+    <section
+      className="bottom-analytics-deck"
+      aria-label="Panel Informativo de Indicadores y Métricas en Tiempo Real"
+    >
       {/* CARD 1: REAL-TIME TECHNICAL OSCILLATORS */}
       <div className="deck-card">
         <div className="deck-card-header">
-          <span className="deck-title">TECHNICAL PULSE · {symbolLabel}</span>
+          <span className="deck-title">OSCILADORES EN VIVO · {symbolLabel}</span>
           <span className={`deck-badge ${rsiColorClass}`}>
             RSI(14): {rsi.toFixed(1)} · {rsiLabel}
           </span>
@@ -90,7 +101,7 @@ export default function AnalyticsAndPositionBar({
         <div className="oscillator-bars">
           <div className="osc-row">
             <div className="osc-meta">
-              <span>RSI Momentum (14)</span>
+              <span>Índice de Fuerza Relativa (RSI 14)</span>
               <strong className={rsiColorClass}>{rsi.toFixed(1)} / 100</strong>
             </div>
             <div className="osc-track">
@@ -103,14 +114,13 @@ export default function AnalyticsAndPositionBar({
 
           <div className="osc-row">
             <div className="osc-meta">
-              <span>Posición Rango 24h (${formatPrice(low24)} – ${formatPrice(high24)})</span>
+              <span>
+                Rango 24h (${formatPrice(low24)} – ${formatPrice(high24)})
+              </span>
               <strong>{range24Pct}%</strong>
             </div>
             <div className="osc-track">
-              <div
-                className="osc-fill osc-fill--range"
-                style={{ width: `${range24Pct}%` }}
-              />
+              <div className="osc-fill osc-fill--range" style={{ width: `${range24Pct}%` }} />
             </div>
           </div>
 
@@ -120,26 +130,74 @@ export default function AnalyticsAndPositionBar({
               <strong>${formatPrice(ticker.vwap)}</strong>
             </div>
             <div>
-              <span>DIST. VWAP</span>
+              <span>DESVIACIÓN VWAP</span>
               <strong className={Number(vwapDiffPct) >= 0 ? 'text-bull' : 'text-bear'}>
                 {Number(vwapDiffPct) >= 0 ? '+' : ''}
                 {vwapDiffPct}%
               </strong>
             </div>
             <div>
-              <span>VOLUMEN 24H</span>
-              <strong>${(ticker.quoteVolume24h / 1e6).toFixed(1)}M</strong>
+              <span>VOLUMEN 24H (USDT)</span>
+              <strong>
+                {ticker.quoteVolume24h
+                  ? `$${(ticker.quoteVolume24h / 1e6).toFixed(1)}M`
+                  : '—'}
+              </strong>
             </div>
           </div>
         </div>
       </div>
 
-      {/* CARD 2: SMART PRICE TARGET & CHART CLICK ALERT */}
+      {/* CARD 2: TENDENCIA TÉCNICA & VOLATILIDAD EN TIEMPO REAL */}
+      <div className="deck-card">
+        <div className="deck-card-header">
+          <span className="deck-title">DIAGNÓSTICO DE TENDENCIA &amp; VOLATILIDAD</span>
+          <span className={`deck-badge ${isTrendBullish ? 'text-bull' : 'text-bear'}`}>
+            {isTrendBullish ? '▲ CRUCE EMA ALCISTA' : '▼ CRUCE EMA BAJISTA'}
+          </span>
+        </div>
+
+        <div className="osc-stats-strip" style={{ borderTop: 'none', paddingTop: 0 }}>
+          <div>
+            <span>EMA RÁPIDA (9)</span>
+            <strong className="text-cyan">${formatPrice(lastEma9)}</strong>
+          </div>
+          <div>
+            <span>EMA LENTA (21)</span>
+            <strong style={{ color: '#a855f7' }}>${formatPrice(lastEma21)}</strong>
+          </div>
+          <div>
+            <span>OPERACIONES 24H</span>
+            <strong>
+              {ticker.tradesCount24h
+                ? ticker.tradesCount24h.toLocaleString('en-US')
+                : '—'}
+            </strong>
+          </div>
+        </div>
+
+        <div className="osc-stats-strip">
+          <div>
+            <span>BANDA BOLLINGER SUP.</span>
+            <strong>${formatPrice(lastBbUpper)}</strong>
+          </div>
+          <div>
+            <span>BANDA BOLLINGER INF.</span>
+            <strong>${formatPrice(lastBbLower)}</strong>
+          </div>
+          <div>
+            <span>AMPLITUD CANAL BB</span>
+            <strong className="text-cyan">{bbWidthPct}%</strong>
+          </div>
+        </div>
+      </div>
+
+      {/* CARD 3: MONITOR DE UMBRAL / ALERTA VISUAL EN EL GRÁFICO */}
       <div className={`deck-card ${alertTriggered ? 'is-alert-active' : ''}`}>
         <div className="deck-card-header">
-          <span className="deck-title">SMART PRICE ALERT · TRIGGER</span>
+          <span className="deck-title">MARCADOR DE REFERENCIA EN GRÁFICO</span>
           <span className="deck-badge text-amber">
-            {alertPrice ? `⚑ ACTIVA: $${formatPrice(alertPrice)}` : 'SIN ALERTA'}
+            {alertPrice ? `⚑ NIVEL: $${formatPrice(alertPrice)}` : 'CLIC EN GRÁFICO'}
           </span>
         </div>
 
@@ -150,149 +208,46 @@ export default function AnalyticsAndPositionBar({
               step="any"
               value={alertInput}
               onChange={(e) => setAlertInput(e.target.value)}
-              placeholder={`Precio objetivo (ej. ${Math.round(currentPrice * 1.002)})`}
+              placeholder={
+                currentPrice
+                  ? `Nivel de referencia (ej. ${Math.round(currentPrice * 1.002)})`
+                  : 'Nivel de referencia USD'
+              }
               className="pro-input"
             />
             <button type="submit" className="pro-btn pro-btn--amber">
-              Fijar
+              Trazar Línea
             </button>
           </div>
 
-          <div className="alert-quick-btns">
-            <button
-              type="button"
-              className="chip-btn"
-              onClick={() => onSetAlertPrice(Number((currentPrice * 1.0015).toFixed(2)))}
-            >
-              +0.15% (${formatPrice(currentPrice * 1.0015)})
-            </button>
-            <button
-              type="button"
-              className="chip-btn"
-              onClick={() => onSetAlertPrice(Number((currentPrice * 0.9985).toFixed(2)))}
-            >
-              -0.15% (${formatPrice(currentPrice * 0.9985)})
-            </button>
-            {alertPrice && (
+          {currentPrice && (
+            <div className="alert-quick-btns">
               <button
                 type="button"
-                className="chip-btn chip-btn--clear"
-                onClick={() => onSetAlertPrice(null)}
+                className="chip-btn"
+                onClick={() => onSetAlertPrice(Number((currentPrice * 1.0015).toFixed(2)))}
               >
-                Limpiar
+                +0.15% (${formatPrice(currentPrice * 1.0015)})
               </button>
-            )}
-          </div>
+              <button
+                type="button"
+                className="chip-btn"
+                onClick={() => onSetAlertPrice(Number((currentPrice * 0.9985).toFixed(2)))}
+              >
+                -0.15% (${formatPrice(currentPrice * 0.9985)})
+              </button>
+              {alertPrice && (
+                <button
+                  type="button"
+                  className="chip-btn chip-btn--clear"
+                  onClick={() => onSetAlertPrice(null)}
+                >
+                  Quitar línea
+                </button>
+              )}
+            </div>
+          )}
         </form>
-      </div>
-
-      {/* CARD 3: LIVE PAPER TRADING & PNL EXECUTION SIMULATOR */}
-      <div className="deck-card">
-        <div className="deck-card-header">
-          <span className="deck-title">LIVE EXECUTION SIMULATOR</span>
-          <span className={`deck-badge ${realizedPnl >= 0 ? 'text-bull' : 'text-bear'}`}>
-             Balance PnL: {realizedPnl >= 0 ? '+' : ''}${realizedPnl.toFixed(2)}
-          </span>
-        </div>
-
-        {!activePosition ? (
-          <div className="trade-exec-box">
-            <div className="trade-params-row">
-              <label className="param-field">
-                <span>CANTIDAD</span>
-                <select
-                  value={tradeQty}
-                  onChange={(e) => setTradeQty(Number(e.target.value))}
-                  className="pro-select"
-                >
-                  <option value={0.25}>0.25 unidades</option>
-                  <option value={1}>1.00 unidad</option>
-                  <option value={2.5}>2.50 unidades</option>
-                  <option value={5}>5.00 unidades</option>
-                </select>
-              </label>
-              <label className="param-field">
-                <span>APALANCAMIENTO</span>
-                <select
-                  value={leverage}
-                  onChange={(e) => setLeverage(Number(e.target.value))}
-                  className="pro-select"
-                >
-                  <option value={1}>1x Spot</option>
-                  <option value={5}>5x Margin</option>
-                  <option value={10}>10x Pro</option>
-                  <option value={25}>25x Turbo</option>
-                </select>
-              </label>
-            </div>
-
-            <div className="trade-action-btns">
-              <button
-                type="button"
-                className="pro-btn pro-btn--bull"
-                onClick={() =>
-                  onOpenPosition({
-                    side: 'LONG',
-                    entryPrice: currentPrice,
-                    qty: tradeQty,
-                    leverage,
-                    openedAt: Date.now(),
-                  })
-                }
-              >
-                ▲ LONG / BUY
-              </button>
-              <button
-                type="button"
-                className="pro-btn pro-btn--bear"
-                onClick={() =>
-                  onOpenPosition({
-                    side: 'SHORT',
-                    entryPrice: currentPrice,
-                    qty: tradeQty,
-                    leverage,
-                    openedAt: Date.now(),
-                  })
-                }
-              >
-                ▼ SHORT / SELL
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="active-position-box">
-            <div className="pos-summary">
-              <div>
-                <span
-                  className={`pos-side-badge ${
-                    activePosition.side === 'LONG' ? 'is-bull' : 'is-bear'
-                  }`}
-                >
-                  {activePosition.side} {activePosition.leverage}x
-                </span>
-                <span className="pos-entry">
-                  Entrada: <strong>${formatPrice(activePosition.entryPrice)}</strong> ({activePosition.qty} u.)
-                </span>
-              </div>
-              <div className={`pos-pnl ${unrealizedUsd >= 0 ? 'text-bull' : 'text-bear'}`}>
-                <strong>
-                  {unrealizedUsd >= 0 ? '+' : ''}${unrealizedUsd.toFixed(2)}
-                </strong>
-                <span>
-                  ({unrealizedPct >= 0 ? '+' : ''}
-                  {unrealizedPct.toFixed(2)}%)
-                </span>
-              </div>
-            </div>
-            <button
-              type="button"
-              className="pro-btn pro-btn--close"
-              onClick={() => onClosePosition(unrealizedUsd)}
-            >
-              Cerrar Posición a Mercado (${formatPrice(currentPrice)})
-            </button>
-          </div>
-        )}
       </div>
     </section>
   );

@@ -3,10 +3,10 @@ import { useEffect, useRef, useState } from 'react';
 const HISTORY_LIMIT = 64;
 
 const PAIR_DEFAULTS = {
-  BTCUSDT: { label: 'BTC / USDT', name: 'Bitcoin', basePrice: 92480, tickScale: 28 },
-  ETHUSDT: { label: 'ETH / USDT', name: 'Ethereum', basePrice: 3185, tickScale: 2.2 },
-  SOLUSDT: { label: 'SOL / USDT', name: 'Solana', basePrice: 214.5, tickScale: 0.35 },
-  BNBUSDT: { label: 'BNB / USDT', name: 'BNB Chain', basePrice: 642.0, tickScale: 0.8 },
+  BTCUSDT: { label: 'BTC / USDT', name: 'Bitcoin', asset: 'BTC' },
+  ETHUSDT: { label: 'ETH / USDT', name: 'Ethereum', asset: 'ETH' },
+  SOLUSDT: { label: 'SOL / USDT', name: 'Solana', asset: 'SOL' },
+  BNBUSDT: { label: 'BNB / USDT', name: 'BNB Chain', asset: 'BNB' },
 };
 
 const INTERVAL_MS = {
@@ -17,91 +17,79 @@ const INTERVAL_MS = {
   '1h': 60 * 60 * 1000,
 };
 
-function buildInitialCandles(basePrice, scale, intervalMs, count = HISTORY_LIMIT) {
-  const now = Date.now();
-  const candles = [];
-  let cursor = basePrice - scale * 4;
-  for (let i = count - 1; i >= 0; i -= 1) {
-    const t = now - i * intervalMs;
-    const phase = (count - i) / 5;
-    const delta = Math.sin(phase) * scale * 1.4 + Math.cos(i * 0.7) * scale * 0.8;
-    const open = cursor;
-    const close = Math.max(1, Number((open + delta * 0.35).toFixed(2)));
-    const high = Number((Math.max(open, close) + Math.abs(delta) * 0.45 + scale * 0.2).toFixed(2));
-    const low = Number((Math.min(open, close) - Math.abs(delta) * 0.4 - scale * 0.15).toFixed(2));
-    const volume = Number((12 + Math.abs(Math.sin(i * 0.9)) * 45).toFixed(3));
-    candles.push({ timestamp: t, open, high, low, close, price: close, volume });
-    cursor = close;
-  }
-  return candles;
+function parseDepthSide(entries) {
+  let cum = 0;
+  return (entries || []).slice(0, 10).map(([p, q]) => {
+    const price = parseFloat(p);
+    const qty = parseFloat(q);
+    cum = Number((cum + qty).toFixed(4));
+    return { price, qty, total: cum };
+  });
 }
 
-function buildSyntheticOrderBook(midPrice, scale) {
-  const step = Math.max(0.01, scale * 0.12);
-  const bids = [];
-  const asks = [];
-  let bidCum = 0;
-  let askCum = 0;
+function formatDepthPayload(rawBids, rawAsks) {
+  const bids = parseDepthSide(rawBids);
+  const asks = parseDepthSide(rawAsks);
+  if (bids.length === 0 || asks.length === 0) return null;
 
-  for (let i = 0; i < 10; i += 1) {
-    const bidPrice = Number((midPrice - (i + 1) * step).toFixed(2));
-    const bidQty = Number((0.15 + Math.abs(Math.sin(midPrice + i * 1.7)) * 1.85).toFixed(4));
-    bidCum = Number((bidCum + bidQty).toFixed(4));
-    bids.push({ price: bidPrice, qty: bidQty, total: bidCum });
-
-    const askPrice = Number((midPrice + (i + 1) * step).toFixed(2));
-    const askQty = Number((0.15 + Math.abs(Math.cos(midPrice + i * 1.3)) * 1.85).toFixed(4));
-    askCum = Number((askCum + askQty).toFixed(4));
-    asks.push({ price: askPrice, qty: askQty, total: askCum });
-  }
-
-  const spread = Number((asks[0].price - bids[0].price).toFixed(2));
-  const spreadPct = Number(((spread / midPrice) * 100).toFixed(4));
+  const bidCum = bids[bids.length - 1].total;
+  const askCum = asks[asks.length - 1].total;
+  const spread = Number(Math.max(0, asks[0].price - bids[0].price).toFixed(2));
+  const mid = (asks[0].price + bids[0].price) / 2 || 1;
+  const spreadPct = Number(((spread / mid) * 100).toFixed(4));
   const totalDepth = bidCum + askCum || 1;
   const buyPressurePct = Math.round((bidCum / totalDepth) * 100);
 
-  return { bids, asks, spread, spreadPct, buyPressurePct, maxTotal: Math.max(bidCum, askCum, 1) };
+  return {
+    bids,
+    asks,
+    spread,
+    spreadPct,
+    buyPressurePct,
+    maxTotal: Math.max(bidCum, askCum, 0.001),
+  };
 }
 
 /**
- * Full Unit 10 WebSocket Lifecycle Hook for Institutional Crypto Terminal.
+ * Full Unit 10 WebSocket Lifecycle Hook — 100% Real Binance Market Data.
  *
- * Implements:
- * - Connect (`onopen`), frame fold (`onmessage`), exponential backoff reconnect (`onclose`),
- *   and strict cleanup (`socket.close()`) on unmount or parameter change.
- * - Multi-stream ingestion (`@trade`, `@ticker`, `@depth10@100ms`) + REST Klines seed.
- * - Optional High-Frequency Simulation engine for offline/demo environments.
+ * - Seeds real historical candles (`/api/v3/klines`), real 24h stats (`/api/v3/ticker/24hr`),
+ *   real L2 order book (`/api/v3/depth`), and real recent trades (`/api/v3/trades`).
+ * - Streams live updates via Binance Combined WebSocket (`@trade`, `@ticker`, `@depth10@100ms`).
+ * - Full Unit 10 lifecycle: `onopen`, `onmessage`, exponential backoff `onclose`, and `socket.close()` on cleanup.
  */
 export default function useCryptoTerminalStream({
   symbol = 'BTCUSDT',
   interval = '1s',
-  mode = 'live', // 'live' | 'simulated'
   enabled = true,
 }) {
   const pairMeta = PAIR_DEFAULTS[symbol] ?? PAIR_DEFAULTS.BTCUSDT;
-  const intervalMs = INTERVAL_MS[interval] ?? 1000;
 
-  const [candles, setCandles] = useState(() =>
-    buildInitialCandles(pairMeta.basePrice, pairMeta.tickScale, intervalMs),
-  );
-  const [ticker, setTicker] = useState(() => ({
-    price: pairMeta.basePrice,
-    change24h: pairMeta.basePrice * 0.0265,
-    change24hPct: 2.65,
-    high24h: Number((pairMeta.basePrice * 1.034).toFixed(2)),
-    low24h: Number((pairMeta.basePrice * 0.968).toFixed(2)),
-    volume24h: 24890.45,
-    quoteVolume24h: 24890.45 * pairMeta.basePrice,
-    vwap: Number((pairMeta.basePrice * 0.996).toFixed(2)),
-  }));
+  const [candles, setCandles] = useState([]);
+  const [ticker, setTicker] = useState({
+    price: null,
+    change24h: 0,
+    change24hPct: 0,
+    high24h: null,
+    low24h: null,
+    volume24h: null,
+    quoteVolume24h: null,
+    vwap: null,
+    tradesCount24h: null,
+  });
   const [priceDirection, setPriceDirection] = useState('neutral');
-  const [orderBook, setOrderBook] = useState(() =>
-    buildSyntheticOrderBook(pairMeta.basePrice, pairMeta.tickScale),
-  );
+  const [orderBook, setOrderBook] = useState({
+    bids: [],
+    asks: [],
+    spread: 0,
+    spreadPct: 0,
+    buyPressurePct: 50,
+    maxTotal: 1,
+  });
   const [trades, setTrades] = useState([]);
   const [connStatus, setConnStatus] = useState('connecting');
   const [lastMessageAt, setLastMessageAt] = useState(null);
-  const [latencyMs, setLatencyMs] = useState(18);
+  const [latencyMs, setLatencyMs] = useState(0);
   const [ticksPerSec, setTicksPerSec] = useState(0);
   const [sequence, setSequence] = useState(0);
   const [latestFrame, setLatestFrame] = useState(null);
@@ -109,9 +97,9 @@ export default function useCryptoTerminalStream({
   const attemptRef = useRef(0);
   const seqRef = useRef(0);
   const tickCounterRef = useRef(0);
-  const lastPriceRef = useRef(pairMeta.basePrice);
+  const lastPriceRef = useRef(null);
 
-  // Measure ticks per second (TPS)
+  // Measure live ticks per second (TPS)
   useEffect(() => {
     const id = setInterval(() => {
       setTicksPerSec(tickCounterRef.current);
@@ -124,46 +112,167 @@ export default function useCryptoTerminalStream({
     const meta = PAIR_DEFAULTS[symbol] ?? PAIR_DEFAULTS.BTCUSDT;
     const bucketMs = INTERVAL_MS[interval] ?? 1000;
 
-    // Reset baseline state immediately when switching pair or timeframe
-    const seeded = buildInitialCandles(meta.basePrice, meta.tickScale, bucketMs);
-    setCandles(seeded);
-    lastPriceRef.current = seeded[seeded.length - 1]?.close ?? meta.basePrice;
-    setOrderBook(buildSyntheticOrderBook(lastPriceRef.current, meta.tickScale));
+    let socket = null;
+    let reconnectTimer = null;
+    let cancelled = false;
+
+    setCandles([]);
     setTrades([]);
     seqRef.current = 0;
     setSequence(0);
 
-    if (!enabled) {
-      setConnStatus('paused');
-      return undefined;
+    // 1. Seed 100% REAL market data from Binance REST API immediately on mount / pair switch
+    async function seedRealMarketData() {
+      try {
+        const [klinesRes, tickerRes, depthRes, tradesRes] = await Promise.all([
+          fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${HISTORY_LIMIT}`),
+          fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`),
+          fetch(`https://api.binance.com/api/v3/depth?symbol=${symbol}&limit=10`),
+          fetch(`https://api.binance.com/api/v3/trades?symbol=${symbol}&limit=20`),
+        ]);
+
+        if (cancelled) return;
+
+        const [rawKlines, rawTicker, rawDepth, rawTrades] = await Promise.all([
+          klinesRes.json(),
+          tickerRes.json(),
+          depthRes.json(),
+          tradesRes.json(),
+        ]);
+
+        if (cancelled) return;
+
+        if (Array.isArray(rawKlines) && rawKlines.length > 0) {
+          const parsedCandles = rawKlines.map((k) => ({
+            timestamp: k[0],
+            open: parseFloat(k[1]),
+            high: parseFloat(k[2]),
+            low: parseFloat(k[3]),
+            close: parseFloat(k[4]),
+            price: parseFloat(k[4]),
+            volume: parseFloat(k[5]),
+          }));
+          setCandles(parsedCandles);
+          lastPriceRef.current = parsedCandles[parsedCandles.length - 1].close;
+        }
+
+        if (rawTicker && rawTicker.lastPrice != null) {
+          const realPrice = parseFloat(rawTicker.lastPrice);
+          lastPriceRef.current = realPrice;
+          const nextTicker = {
+            price: realPrice,
+            change24h: parseFloat(rawTicker.priceChange) || 0,
+            change24hPct: Number(parseFloat(rawTicker.priceChangePercent || 0).toFixed(2)),
+            high24h: parseFloat(rawTicker.highPrice),
+            low24h: parseFloat(rawTicker.lowPrice),
+            volume24h: Number(parseFloat(rawTicker.volume || 0).toFixed(2)),
+            quoteVolume24h: Number(parseFloat(rawTicker.quoteVolume || 0).toFixed(0)),
+            vwap: Number(parseFloat(rawTicker.weightedAvgPrice || realPrice).toFixed(2)),
+            tradesCount24h: rawTicker.count ?? null,
+          };
+          setTicker(nextTicker);
+          setLatestFrame({
+            kind: 'snapshot',
+            deviceId: `binance-${symbol.toLowerCase()}`,
+            symbol: meta.label,
+            online: true,
+            readings: {
+              priceUsd: nextTicker.price,
+              change24hPct: nextTicker.change24hPct,
+              high24h: nextTicker.high24h,
+              low24h: nextTicker.low24h,
+              volumeAsset: nextTicker.volume24h,
+              vwap: nextTicker.vwap,
+            },
+            sequence: 0,
+            timestamp: Date.now(),
+          });
+        }
+
+        if (rawDepth && Array.isArray(rawDepth.bids) && Array.isArray(rawDepth.asks)) {
+          const formattedBook = formatDepthPayload(rawDepth.bids, rawDepth.asks);
+          if (formattedBook) setOrderBook(formattedBook);
+        }
+
+        if (Array.isArray(rawTrades)) {
+          const parsedTrades = rawTrades
+            .slice(-20)
+            .reverse()
+            .map((t) => {
+              const p = parseFloat(t.price);
+              const q = parseFloat(t.qty);
+              const usdVal = p * q;
+              return {
+                id: `${t.id}-${t.time}`,
+                price: p,
+                qty: q,
+                usdValue: usdVal,
+                time: new Date(t.time).toLocaleTimeString('es-ES', {
+                  hour12: false,
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit',
+                }),
+                side: t.isBuyerMaker ? 'SELL' : 'BUY',
+                isWhale: usdVal >= 15000,
+              };
+            });
+          setTrades(parsedTrades);
+        }
+      } catch {
+        // WebSocket stream will populate on first message if REST call fails
+      }
     }
 
-    let socket = null;
-    let reconnectTimer = null;
-    let simTimer = null;
-    let cancelled = false;
+    seedRealMarketData();
+
+    if (!enabled) {
+      setConnStatus('paused');
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    // 2. Connect to Real Binance Combined WebSocket Stream
+    const symLower = symbol.toLowerCase();
+    const wsUrl = `wss://stream.binance.com:9443/stream?streams=${symLower}@trade/${symLower}@ticker/${symLower}@depth10@100ms`;
 
     function recordTick(nextPrice, tradeQty, eventTime, isBuyerMaker = false) {
       const prevPrice = lastPriceRef.current;
-      if (nextPrice > prevPrice) setPriceDirection('up');
-      else if (nextPrice < prevPrice) setPriceDirection('down');
+      if (prevPrice != null) {
+        if (nextPrice > prevPrice) setPriceDirection('up');
+        else if (nextPrice < prevPrice) setPriceDirection('down');
+      }
       lastPriceRef.current = nextPrice;
 
       tickCounterRef.current += 1;
       seqRef.current += 1;
       const currentSeq = seqRef.current;
       const now = Date.now();
-      const lag = eventTime ? Math.max(4, Math.min(450, now - eventTime)) : 14;
+      const lag = eventTime ? Math.max(2, Math.min(600, Math.abs(now - eventTime))) : 12;
 
       setSequence(currentSeq);
       setLastMessageAt(now);
       setLatencyMs(lag);
 
-      // Update OHLC candle ring
+      // Update OHLC candle ring with real trade price
       setCandles((prev) => {
-        if (!prev || prev.length === 0) return prev;
-        const last = prev[prev.length - 1];
         const bucketStart = Math.floor(now / bucketMs) * bucketMs;
+        if (!prev || prev.length === 0) {
+          return [
+            {
+              timestamp: bucketStart,
+              open: nextPrice,
+              high: nextPrice,
+              low: nextPrice,
+              close: nextPrice,
+              price: nextPrice,
+              volume: Number(tradeQty.toFixed(4)),
+            },
+          ];
+        }
+
+        const last = prev[prev.length - 1];
         const lastBucket = Math.floor(last.timestamp / bucketMs) * bucketMs;
 
         if (bucketStart <= lastBucket) {
@@ -191,7 +300,7 @@ export default function useCryptoTerminalStream({
         return ring.length > HISTORY_LIMIT ? ring.slice(-HISTORY_LIMIT) : ring;
       });
 
-      // Update live trades tape
+      // Add real trade to tape
       const usdValue = nextPrice * tradeQty;
       const tradeEntry = {
         id: `${now}-${currentSeq}`,
@@ -209,17 +318,17 @@ export default function useCryptoTerminalStream({
       };
       setTrades((prev) => [tradeEntry, ...prev.slice(0, 27)]);
 
-      // Update Unit 10 Telemetry Frame object
+      // Update ticker price and Unit 10 telemetry frame
       setTicker((prevTicker) => {
         const updatedTicker = {
           ...prevTicker,
           price: nextPrice,
-          high24h: Math.max(prevTicker.high24h, nextPrice),
-          low24h: Math.min(prevTicker.low24h, nextPrice),
+          high24h: prevTicker.high24h != null ? Math.max(prevTicker.high24h, nextPrice) : nextPrice,
+          low24h: prevTicker.low24h != null ? Math.min(prevTicker.low24h, nextPrice) : nextPrice,
         };
         setLatestFrame({
           kind: 'snapshot',
-          deviceId: mode === 'live' ? `binance-${symbol.toLowerCase()}` : `sim-${symbol.toLowerCase()}`,
+          deviceId: `binance-${symbol.toLowerCase()}`,
           symbol: meta.label,
           online: true,
           readings: {
@@ -227,7 +336,7 @@ export default function useCryptoTerminalStream({
             change24hPct: updatedTicker.change24hPct,
             high24h: updatedTicker.high24h,
             low24h: updatedTicker.low24h,
-            volumeBtc: updatedTicker.volume24h,
+            volumeAsset: updatedTicker.volume24h,
             vwap: updatedTicker.vwap,
             tradeQty,
           },
@@ -237,55 +346,6 @@ export default function useCryptoTerminalStream({
         return updatedTicker;
       });
     }
-
-    // Mode 1: High-Frequency Autonomous Simulator (guaranteed offline/competition mode)
-    if (mode === 'simulated') {
-      setConnStatus('live');
-      simTimer = setInterval(() => {
-        if (cancelled) return;
-        const prev = lastPriceRef.current;
-        const shock = (Math.random() - 0.492) * meta.tickScale * 0.9;
-        const wave = Math.sin(seqRef.current / 7) * meta.tickScale * 0.35;
-        const nextPrice = Number(Math.max(1, prev + shock + wave).toFixed(2));
-        const qty = Number((0.015 + Math.random() * 1.45).toFixed(4));
-        const isSell = nextPrice < prev;
-        recordTick(nextPrice, qty, Date.now() - 8, isSell);
-        setOrderBook(buildSyntheticOrderBook(nextPrice, meta.tickScale));
-      }, 350);
-
-      return () => {
-        cancelled = true;
-        clearInterval(simTimer);
-      };
-    }
-
-    // Mode 2: Live Binance REST Klines Seed + Combined WebSocket Stream
-    const klineUrl = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${HISTORY_LIMIT}`;
-    fetch(klineUrl)
-      .then((res) => res.json())
-      .then((raw) => {
-        if (cancelled || !Array.isArray(raw) || raw.length === 0) return;
-        const parsed = raw.map((k) => ({
-          timestamp: k[0],
-          open: parseFloat(k[1]),
-          high: parseFloat(k[2]),
-          low: parseFloat(k[3]),
-          close: parseFloat(k[4]),
-          price: parseFloat(k[4]),
-          volume: parseFloat(k[5]),
-        }));
-        setCandles(parsed);
-        const latestClose = parsed[parsed.length - 1].close;
-        lastPriceRef.current = latestClose;
-        setTicker((prev) => ({ ...prev, price: latestClose }));
-        setOrderBook(buildSyntheticOrderBook(latestClose, meta.tickScale));
-      })
-      .catch(() => {
-        // Keep synthetic seed if REST is unreachable
-      });
-
-    const symLower = symbol.toLowerCase();
-    const wsUrl = `wss://stream.binance.com:9443/stream?streams=${symLower}@trade/${symLower}@ticker/${symLower}@depth10@100ms`;
 
     function connect() {
       if (cancelled) return;
@@ -304,17 +364,15 @@ export default function useCryptoTerminalStream({
           const envelope = JSON.parse(event.data);
           const payload = envelope.data ?? envelope;
 
-          // 1. Live Trade Tick (`@trade`)
           if (payload.e === 'trade') {
             const nextPrice = parseFloat(payload.p);
             const qty = parseFloat(payload.q);
             if (Number.isFinite(nextPrice)) {
-              recordTick(nextPrice, Number.isFinite(qty) ? qty : 0.05, payload.E, Boolean(payload.m));
+              recordTick(nextPrice, Number.isFinite(qty) ? qty : 0, payload.E, Boolean(payload.m));
             }
             return;
           }
 
-          // 2. 24hr Rolling Ticker (`@ticker`)
           if (payload.e === '24hrTicker') {
             const lastP = parseFloat(payload.c);
             setTicker((prev) => ({
@@ -326,46 +384,17 @@ export default function useCryptoTerminalStream({
               volume24h: Number(parseFloat(payload.v || 0).toFixed(2)),
               quoteVolume24h: Number(parseFloat(payload.q || 0).toFixed(0)),
               vwap: Number(parseFloat(payload.w || prev.vwap).toFixed(2)),
+              tradesCount24h: payload.n ?? prev.tradesCount24h,
             }));
             return;
           }
 
-          // 3. Partial Book Depth (`@depth10@100ms`)
           if (Array.isArray(payload.bids) && Array.isArray(payload.asks)) {
-            let bidCum = 0;
-            const bids = payload.bids.slice(0, 10).map(([p, q]) => {
-              const price = parseFloat(p);
-              const qty = parseFloat(q);
-              bidCum = Number((bidCum + qty).toFixed(4));
-              return { price, qty, total: bidCum };
-            });
-
-            let askCum = 0;
-            const asks = payload.asks.slice(0, 10).map(([p, q]) => {
-              const price = parseFloat(p);
-              const qty = parseFloat(q);
-              askCum = Number((askCum + qty).toFixed(4));
-              return { price, qty, total: askCum };
-            });
-
-            if (bids.length > 0 && asks.length > 0) {
-              const spread = Number((asks[0].price - bids[0].price).toFixed(2));
-              const mid = (asks[0].price + bids[0].price) / 2 || 1;
-              const spreadPct = Number(((spread / mid) * 100).toFixed(4));
-              const totalDepth = bidCum + askCum || 1;
-              const buyPressurePct = Math.round((bidCum / totalDepth) * 100);
-              setOrderBook({
-                bids,
-                asks,
-                spread,
-                spreadPct,
-                buyPressurePct,
-                maxTotal: Math.max(bidCum, askCum, 0.01),
-              });
-            }
+            const formattedBook = formatDepthPayload(payload.bids, payload.asks);
+            if (formattedBook) setOrderBook(formattedBook);
           }
         } catch {
-          // Ignore malformed wire message
+          // Ignore malformed message
         }
       };
 
@@ -388,7 +417,6 @@ export default function useCryptoTerminalStream({
     return () => {
       cancelled = true;
       clearTimeout(reconnectTimer);
-      clearInterval(simTimer);
       if (socket) {
         socket.onopen = null;
         socket.onmessage = null;
@@ -397,7 +425,7 @@ export default function useCryptoTerminalStream({
         socket.close();
       }
     };
-  }, [symbol, interval, mode, enabled]);
+  }, [symbol, interval, enabled]);
 
   return {
     pairMeta,
