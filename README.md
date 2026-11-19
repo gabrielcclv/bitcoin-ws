@@ -1,4 +1,4 @@
-# Unit 10 · Bitcoin WebSocket Streamfield & Python-Backed Interface
+# Bitcoin WebSocket Streamfield & Python-Backed Interface
 
 Aplicación React construida siguiendo la lección **[Unit 10: IoT/Robotics Control-Panel & Python-Backed Interface](https://ruvebal.github.io/web-atelier-udit/lessons/en/feii/unit-10-iot-python-backend/)** de **WEB ATELIER (UDIT)** para pintar y monitorizar la cotización de **Bitcoin (BTC/USDT)** en tiempo real mediante **WebSockets**.
 
